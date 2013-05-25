@@ -7,6 +7,7 @@
  */
 
 #import "SDWebImageManager.h"
+#import "UIImage+GIF.h"
 #import <objc/message.h>
 
 @interface SDWebImageCombinedOperation : NSObject <SDWebImageOperation>
@@ -39,7 +40,7 @@
 {
     if ((self = [super init]))
     {
-        _imageCache = [SDImageCache sharedImageCache];
+        _imageCache = [self createCache];
         _imageDownloader = SDWebImageDownloader.new;
         _failedURLs = NSMutableArray.new;
         _runningOperations = NSMutableArray.new;
@@ -47,6 +48,10 @@
     return self;
 }
 
+- (SDImageCache *)createCache
+{
+    return [SDImageCache sharedImageCache];
+}
 
 - (NSString *)cacheKeyForURL:(NSURL *)url
 {
@@ -78,7 +83,13 @@
     __block SDWebImageCombinedOperation *operation = SDWebImageCombinedOperation.new;
     __weak SDWebImageCombinedOperation *weakOperation = operation;
     
-    if (!url || !completedBlock || (!(options & SDWebImageRetryFailed) && [self.failedURLs containsObject:url]))
+    BOOL isFailedUrl = NO;
+    @synchronized(self.failedURLs)
+    {
+        isFailedUrl = [self.failedURLs containsObject:url];
+    }
+
+    if (!url || !completedBlock || (!(options & SDWebImageRetryFailed) && isFailedUrl))
     {
         if (completedBlock) completedBlock(nil, nil, SDImageCacheTypeNone, NO);
         return operation;
@@ -116,7 +127,7 @@
                 downloaderOptions |= SDWebImageDownloaderIgnoreCachedResponse;
             }
             __block id<SDWebImageOperation> subOperation = [self.imageDownloader downloadImageWithURL:url options:downloaderOptions progress:progressBlock completed:^(UIImage *downloadedImage, NSData *data, NSError *error, BOOL finished)
-            {
+            {                
                 if (weakOperation.cancelled)
                 {
                     completedBlock(nil, nil, SDImageCacheTypeNone, finished);
@@ -144,8 +155,9 @@
                     else if (downloadedImage && [self.delegate respondsToSelector:@selector(imageManager:transformDownloadedImage:withURL:)])
                     {
                         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^
-                        {
-                            UIImage *transformedImage = [self.delegate imageManager:self transformDownloadedImage:downloadedImage withURL:url];
+                                       {
+                            BOOL isImageGIF = [data sd_isGIF];
+                            UIImage *transformedImage = isImageGIF ? downloadedImage : [self.delegate imageManager:self transformDownloadedImage:downloadedImage withURL:url];
 
                             dispatch_async(dispatch_get_main_queue(), ^
                             {
@@ -154,7 +166,8 @@
 
                             if (transformedImage && finished)
                             {
-                                [self.imageCache storeImage:transformedImage imageData:nil forKey:key toDisk:cacheOnDisk];
+                                NSData *dataToStore = [transformedImage isEqual:downloadedImage] ? data : nil;
+                                [self.imageCache storeImage:transformedImage imageData:dataToStore forKey:key toDisk:cacheOnDisk];
                             }
                         });
                     }
